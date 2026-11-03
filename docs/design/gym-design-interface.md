@@ -17,8 +17,9 @@ and JSON schemas; add transport wrappers after the local loop works.
 
 - The product is a **gym**, separate from the RSI system. It evaluates architecture
   research under a common execution contract.
-- Research is offline. Every session receives the same source baseline, components,
-  documentation, dependencies and baseline records. New session artifacts are private
+- Research is offline. Every session receives the same versioned API/SDK contract,
+  read-only architecture reference, templates and baseline records, not a checkout
+  of the platform repository. New session artifacts are private
   to that session. Agent inference uses a platform-controlled broker; the research
   workspace and candidate workers have no arbitrary network access or credentials.
 - The final output is **one architecture artifact**: plugin source, declaration and
@@ -28,6 +29,12 @@ and JSON schemas; add transport wrappers after the local loop works.
   exports the artifact with its own versioned runner. Neither research nor final
   execution requires a participant-written launch script. Admission and operational
   failures are structured outcomes, not occasions to silently patch the candidate.
+- The full NextTransformer checkout, dependencies, data, runner and evaluation code
+  stay platform-side. RSI can inspect approved architecture source through a read-only
+  reference API. It cannot submit patches to the repository or choose a replacement
+  runner. Candidate code uses a documented, versioned component SDK inside the
+  execution sandbox. The SDK defines allowed imports; isolation must separately
+  enforce that private platform modules and files are inaccessible.
 - Stage one permits composition and local invention through the existing plugin
   contract. The shared shell, optimizer recipe, data pipeline and evaluation remain
   controlled. Arbitrary whole-model architectures are a stage-two TODO.
@@ -158,6 +165,26 @@ access to held-out data in the first place.
 
 ## Candidate artifact
 
+The participant deliverable is an API client and architecture SDK, not the platform
+repository. A local workspace, if supplied, contains only candidate drafts and client
+tools. All experimental execution remains remote to that workspace, through the gym.
+Local transport is allowed for development, but it must retain the same privilege
+boundaries; a Python SDK is not permission to import platform internals in-process.
+
+Read-only discovery operations expose a catalog of supported components, their
+contracts, selected architecture source, examples, and approved baseline metadata.
+References are versioned resource IDs rather than arbitrary repository paths. Do not
+expose a generic filesystem reader or shell. The same resource set is available to
+all researchers in a comparison cohort.
+
+Submission accepts only an architecture artifact schema and allowed package files,
+not a repository patch, arbitrary run command or filesystem overlay. Reject path
+traversal, symlinks, package-name collisions, excessive payloads and files that attempt
+to replace runner/SDK modules. Store candidates in a distinct namespace; the platform
+adapter maps their declared entrypoints to supported NextTransformer hooks. Read-only
+reference source is useful research material, but it confers no write access to the
+original modules. Sandboxing still applies to all accepted Python code.
+
 ```text
 candidate/
   proposal.json             hypothesis, parent IDs, entrypoint, contract version
@@ -181,6 +208,7 @@ All operations return versioned JSON. Long work returns a job ID immediately.
 | Operation | Input | Output |
 | --- | --- | --- |
 | `describe_space` | contract version | fixed controls, available hooks, option types, bounds, templates, evaluation policy |
+| `list_components` / `read_reference` | catalog filters / approved resource ID | versioned component signatures, architecture source, examples and documentation; no arbitrary paths |
 | `observe` | filters, cursor | remaining compute, comparable dev results, candidate lineage, failure summaries |
 | `get_candidate` | candidate ID | source artifact, hypothesis, parents, reports and provenance |
 | `submit_candidate` | artifact ID, hypothesis, parent IDs, idempotency key | immutable candidate ID and source hash |
