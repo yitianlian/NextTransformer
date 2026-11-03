@@ -1,5 +1,13 @@
 # Instructions for coding agents
 
+## Fork development
+
+Development in this checkout targets the public `yitianlian/NextTransformer` fork.
+Use `yitianlian/<topic>` branches; keep `main` as the upstream baseline.
+`origin` is the public fork and the default push destination; `upstream` is
+`Interactive-Active-AI/NextTransformer`. Do not use private repositories or their
+branches as development targets. Preserve existing results and cost proofs.
+
 NextTransformer is built to be worked on by AI agents as well as people. If you are an agent working in this
 repository, follow these rules in addition to the user's request.
 
