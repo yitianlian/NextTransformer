@@ -1,6 +1,6 @@
 # Architecture design interface for the research gym
 
-Status: exploration and proposed contract, not an implemented service.
+Status: agreed v1 design boundaries and proposed API; not an implemented service.
 Source baseline: public fork `yitianlian/NextTransformer`, commit `41b6016`.
 This proposal does not change Arena v1 or the frozen training protocol.
 
@@ -12,6 +12,114 @@ experiment, and use the returned evidence to design the next candidate. The gym
 owns execution and measurements; the agent owns the architecture and hypothesis.
 Python, CLI and MCP should expose the same application contract. Start with Python
 and JSON schemas; add transport wrappers after the local loop works.
+
+## Agreed v1 boundaries
+
+- The product is a **gym**, separate from the RSI system. It evaluates architecture
+  research under a common execution contract.
+- Research is offline. Every session receives the same source baseline, components,
+  documentation, dependencies and baseline records. New session artifacts are private
+  to that session. Agent inference uses a platform-controlled broker; the research
+  workspace and candidate workers have no arbitrary network access or credentials.
+- The final output is **one architecture artifact**: plugin source, declaration and
+  architecture configuration. It contains no pretrained weights, executable training
+  entrypoint, environment installer, evaluator or claimed score.
+- The gym automatically builds, checks, initializes, trains, evaluates, audits and
+  exports the artifact with its own versioned runner. Neither research nor final
+  execution requires a participant-written launch script. Admission and operational
+  failures are structured outcomes, not occasions to silently patch the candidate.
+- Stage one permits composition and local invention through the existing plugin
+  contract. The shared shell, optimizer recipe, data pipeline and evaluation remain
+  controlled. Arbitrary whole-model architectures are a stage-two TODO.
+- Research candidates may have different FLOPs/token. This is separate from the
+  fixed cost requirement for final official admission. Return cost and training
+  horizon alongside every score; unequal-cost observations are not matched comparisons.
+- RSI controls candidate proposals, bounded experiment lengths, early stopping,
+  continuation and selection. Concurrent jobs are allowed under a configured limit
+  and one atomic session budget. Scheduling must not alter the declared LR schedule.
+- Continuing training requires the same immutable architecture and configuration,
+  compatible environment and complete checkpoint state. Changed architecture or
+  configuration starts from scratch. Consumed budget never resets on continuation.
+- All candidate execution, including debug forward/backward passes, tests and
+  profiling, goes through the gym. The workspace has no direct experiment device
+  access or alternative execution route to experiment resources.
+- No unaccountable candidate computation is admitted. Unknown operations yield
+  static diagnostics and block dynamic execution until a supported, auditable path
+  exists. A reference implementation alone does not prove the actual kernel cost.
+- Research feedback includes dev BPB, training curves, FLOPs/token, cumulative cost,
+  throughput, memory, check reports and bounded logs. Formal validation and CORE are
+  not returned as feedback for an active research session.
+- The researcher freezes one final candidate. The platform performs a fresh final
+  run under a common, separately allocated scoring budget. Final results cannot be
+  used to reopen that research session. Presentation follows the official leaderboard,
+  including BPB, CORE and provenance; no new composite score is required.
+
+## Research budget contract
+
+The v1 hard research limit is `research_flops_limit`, an explicitly configured finite
+positive value per session. No amount has been selected yet. Missing configuration
+blocks experiment execution; it never means unlimited compute. Agent inference
+cost accounting is deferred. GPU-hours and elapsed time are operational diagnostics,
+not substitutes for the FLOPs comparison. Resource/time limits still bound workers.
+
+Every model computation in debugging, correctness checks, training, evaluation and
+profiling consumes this account, including failed and cancelled attempts. Static
+metadata/source checks and symbolic cost estimation are tracked separately from
+executed model FLOPs. The accounting convention and coverage are versioned and fixed
+for a comparison; no work is silently assigned zero cost because it is unsupported.
+
+Before execution, return a cost report with:
+
+- training FLOPs per input token, its forward/backward/optimizer/auxiliary components,
+  the configured accounting version and coverage status;
+- stage-specific costs and the averaging horizon for staged or dynamic architectures;
+- ratio to the official SSSL anchor, final-admission eligibility and reasons;
+- quoted total experiment cost, including checks and evaluation, and the fraction
+  of the remaining research budget it would reserve.
+
+Keep `spent`, `reserved` and `available = limit - spent - reserved` distinct. Reserve
+atomically before dispatch, including a conservative allowance for bounded work in
+flight and termination. Reject a launch or next work unit that cannot fit. Release
+unused reservations only after termination and reconciliation. Unknown consumption
+after a crash remains reserved pending reconciliation; it is never automatically
+refunded. Retries are idempotent, and infrastructure failures are marked separately
+without erasing consumed compute. Resume and finalization survive controller restarts.
+
+Formal scoring has a separately configured common allocation and accounting record.
+The official profile uses the admitted cost, 49.152B tokens and full evaluation
+schedule. Smaller profiles must be explicitly named and cannot enter the official
+leaderboard as equivalent runs. Final submission does not bypass resource readiness,
+admission or budget checks.
+
+## Isolation and trusted measurements
+
+The control service and ledger run outside candidate workers. Each worker receives
+an immutable candidate and read-only runner, only the data needed for its operation,
+bounded resources and a private output area. It has no host socket, host credentials,
+other session storage or writable score/budget database. Artifact access is authorized
+by session ownership; IDs and paths alone confer no access.
+
+Candidates remain untrusted Python even after static checks. Do not import them into
+the privileged control service. Model execution and trusted scoring need separate
+privilege boundaries: the evaluation prediction interface takes inputs, not target
+labels; the trusted scorer derives BPB from predictions and labels. Candidate-reported
+losses or score files are not authoritative. Bound and validate prediction outputs.
+The official protocol remains the compatibility target; a safe execution adapter
+requires equivalence tests rather than claiming the existing in-process trainer is
+already an isolation boundary.
+
+Cost checks must cover the frozen code and the actual executed paths, including
+training/evaluation differences and any accelerated path. Hash equality alone does
+not establish identical behavior. Before accepting general plugin execution, tests
+must demonstrate refusal of unsupported work, score forgery, filesystem/network
+escape, cross-session access and budget oversubscription. A container alone is not
+proof of these properties. The specific sandbox/runtime is an implementation choice
+still to validate, not a completed capability.
+
+Existing validation and CORE data are public. Offline execution limits access in
+this session but cannot remove knowledge already present in a researcher model.
+Describe this as controlled access to a public benchmark, not a secret test set.
+An additional private evaluation set remains a separate, undecided future protocol.
 
 ## What the public code provides
 
@@ -76,13 +184,31 @@ All operations return versioned JSON. Long work returns a job ID immediately.
 | `observe` | filters, cursor | remaining compute, comparable dev results, candidate lineage, failure summaries |
 | `get_candidate` | candidate ID | source artifact, hypothesis, parents, reports and provenance |
 | `submit_candidate` | artifact ID, hypothesis, parent IDs, idempotency key | immutable candidate ID and source hash |
-| `validate_candidate` | candidate ID | job ID; eventual structured static, correctness and audit reports |
+| `validate_candidate` | candidate ID | static coverage report; budgeted dynamic-check job only after coverage passes |
 | `calibrate_candidate` | candidate ID, supported search grid | job ID; derived config ID, cost proof, deviation from anchor |
+| `inspect_cost` | candidate ID, config ID, profile | component/stage FLOPs/token, anchor ratio, accounting coverage and admission status |
+| `debug_candidate` | candidate ID, config ID, named check and bounded inputs | budgeted isolated job; diagnostic output and charged compute |
 | `quote_experiment` | candidate ID, config ID, research profile | expiring quote, maximum cost, required resources, comparable cohort |
-| `run_experiment` | quote ID, idempotency key | job ID and reservation ID |
+| `run_experiment` | quote ID, target update, optional checkpoint ID, idempotency key | job ID and reservation ID; no arbitrary command or training script |
 | `get_job` / `read_events` | job ID / cursor | state, progress, bounded diagnostics and next cursor |
 | `cancel_job` | job ID, idempotency key | cancellation status; compute charged through actual termination |
 | `get_result` | job ID | dev BPB, training curve, cost, completion status, artifact IDs |
+| `get_budget` | session ID | limit, spent, reserved, available, accounting version |
+| `finalize` | candidate ID, frozen config ID, idempotency key | immutable final submission ID and platform scoring status |
+
+Candidate, experiment, checkpoint and research session have distinct IDs. A quote
+binds the immutable candidate/config/profile, target update and continuation state;
+`run_experiment` cannot override these after quotation. Checkpoints belong to one
+candidate/config and capture optimizer, RNG, schedule and data state, not just weights.
+Finalization locks candidate selection and prevents new research launches; it must
+terminate or reconcile outstanding research jobs before final scoring. The scorer
+never loads research checkpoints. Session state is durable across RSI process restarts.
+
+Provide a blocking `evaluate(candidate, profile)` convenience adapter over the same
+job API for frameworks expecting a scalar/result callback. It must preserve detailed
+feedback, provenance and accounting. RSIHub can adapt through its evaluator script
+and `EvaluationRecord`; FlashRSI can adapt at its snapshot evaluation boundary. Neither
+framework's source snapshot should be confused with a training checkpoint.
 
 Formal admission remains the separate Arena workflow. The initial autonomous loop
 selects on dev BPB or training loss. Formal validation and CORE are not feedback
@@ -160,6 +286,23 @@ that as independent dev evidence. Establish horizon usefulness with dev measurem
 short horizons remain configurable research policy until supported by such evidence.
 
 ## Scope of this exploration
+
+### Deferred work
+
+- Stage two: an arbitrary-model contract beyond `ReferenceLM`, with explicit parameter
+  roles, initialization, state/checkpoint schema, calibration and compatibility rules.
+- Agent inference cost metering and limits, including broker usage provenance.
+- Cross-architecture weight transfer, distillation and parameter inheritance.
+- Internet-enabled research as a separately specified setting; no v1 network toggle
+  that silently changes a comparison cohort.
+- Optional private held-out evaluation and additional tasks, under a separate protocol.
+
+### Deployment settings still required
+
+Choose concrete research FLOPs limits, final scoring allocation, available hardware,
+concurrency and per-worker limits, supported dependencies/operations and research
+profiles before enabling execution. These are not implicitly authorized by agreeing
+to this design. No GPU runs or external services are launched by this document.
 
 Only documentation and fork workflow guidance are changed. No runtime service,
 training run, benchmark result or architectural admission is claimed. Private code
