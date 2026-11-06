@@ -20,6 +20,7 @@ from mcp.client.stdio import stdio_client
 
 from nexttransformer_gym.backend import NativeBackend, Scheduler
 from nexttransformer_gym.client import GymClient
+from nexttransformer_gym.isolation import BACKENDS
 from nexttransformer_gym.server import atomic_json, bind
 from nexttransformer_gym.service import Service
 
@@ -86,6 +87,7 @@ def main():
         "--gpu", required=True, help="Explicit allocated GPU UUID or index"
     )
     parser.add_argument("--worker-python", required=True)
+    parser.add_argument("--isolation", choices=BACKENDS, default="bwrap")
     args = parser.parse_args()
     state = args.state_dir.resolve()
     state.mkdir(parents=True, exist_ok=True)
@@ -109,6 +111,7 @@ def main():
             "gpu_ids": [args.gpu],
             "gpu_memory_limit_bytes": 2 * 1024**3,
             "max_concurrent_jobs": 1,
+            "isolation": args.isolation,
         },
     )
     resources = backend.resources(False)

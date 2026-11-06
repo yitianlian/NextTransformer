@@ -229,7 +229,11 @@ def test_host_run_passes_operator_config_and_worker_python_to_real_backend(
     backend = observed["service"].backend
     assert settings.platform == ROOT
     assert json.loads(settings.execution_config.read_text()) == policy
-    assert backend.execution_config == {**policy, "allow_idle_graphics": False}
+    assert backend.execution_config == {
+        **policy,
+        "allow_idle_graphics": False,
+        "isolation": "bwrap",
+    }
     assert backend.python == str(Path(sys.executable).absolute())
     assert backend.worker_runtime["python"] == list(sys.version_info[:3])
     assert backend.server_id == "fixture-node"

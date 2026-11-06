@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .common import GymError, require
+from .isolation import BACKENDS
 
 
 UUID = re.compile(r"GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
@@ -34,6 +35,7 @@ def configuration(value=None):
                 "gpu_memory_limit_bytes",
                 "max_concurrent_jobs",
                 "allow_idle_graphics",
+                "isolation",
             }
         ),
         "invalid_request",
@@ -75,12 +77,19 @@ def configuration(value=None):
         "invalid_request",
         "allow_idle_graphics must be an operator-supplied boolean.",
     )
+    isolation = value.get("isolation", "bwrap")
+    require(
+        isolation in BACKENDS,
+        "invalid_request",
+        "isolation must be one of: " + ", ".join(BACKENDS) + ".",
+    )
     return {
         "schema_version": "gym.execution.v1",
         "gpu_ids": ids,
         "gpu_memory_limit_bytes": memory,
         "max_concurrent_jobs": 1,
         "allow_idle_graphics": allow_graphics,
+        "isolation": isolation,
     }
 
 

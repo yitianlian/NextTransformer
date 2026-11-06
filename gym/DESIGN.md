@@ -92,10 +92,16 @@ Packages contain at most 1 MiB and 32 text files inside the permitted layout.
 Gym rejects traversal, symlinks, duplicate paths, runtime shadowing, binaries, weights and dependency installers.
 Each session can retain at most 128 candidates. Changing source or configuration creates a new immutable candidate.
 
-Research workers use fresh bubblewrap user, mount, PID and network namespaces without an unsandboxed fallback.
-Workers receive only runtime libraries, read-only platform code, approved data and the current job's checkpoint/output.
-Workers receive no controller state, credentials, host processes or host networking. CPU inspection receives no GPU devices.
-CUDA workers receive the selected NVIDIA device, required control/UVM devices and read-only driver metadata with a private PID procfs.
+The operator selects the research worker isolation backend. Gym never switches backends automatically.
+The default `bwrap` backend uses fresh bubblewrap user, mount, PID and network namespaces.
+The `landlock` backend serves hosts that deny mounts. It requires a root controller, so workers run as a separate user.
+It combines Landlock path rules with user, network, IPC and UTS namespaces. CPU workers also get a PID namespace and a seccomp filter against new Unix sockets.
+The `none` backend disables isolation for trusted candidates. Gym prints a warning when it starts with this backend.
+Isolated workers can read only runtime libraries, platform code, approved data and the current job's checkpoint/output.
+Isolated workers cannot read controller state or credentials and have no host networking. CPU inspection receives no GPU devices.
+Under `bwrap`, CUDA workers receive the selected NVIDIA device, required control/UVM devices and read-only driver metadata with a private PID procfs.
+Under `landlock`, workers can detect path existence, list directories under the import roots and change file metadata.
+CUDA workers keep the host PID namespace, can create Unix sockets and can open every NVIDIA device node.
 
 ## Resources and concurrency
 

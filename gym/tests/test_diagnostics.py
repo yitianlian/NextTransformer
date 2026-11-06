@@ -3,6 +3,9 @@
 import base64
 import copy
 import io
+import json
+import os
+import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 import sys
@@ -10,11 +13,11 @@ import zipfile
 
 import pytest
 
-from nexttransformer_gym import gpu, isolation
+from nexttransformer_gym import gpu, isolation, landlock
 from nexttransformer_gym.backend import NativeBackend, Scheduler
 from nexttransformer_gym.common import GymError
 
-from test_gym import ROOT, candidate_bytes, context as make_context
+from test_gym import ISOLATION, ROOT, candidate_bytes, context as make_context, session
 
 
 @pytest.fixture(name="context")
@@ -142,7 +145,11 @@ def test_official_final_diagnostics_use_only_the_bounded_gpu_pool(
         memory_limit_bytes=1024**3,
     )
     original = copy.deepcopy(final)
-    policy = {"gpu_ids": [selected], "gpu_memory_limit_bytes": 2 * 1024**3}
+    policy = {
+        "gpu_ids": [selected],
+        "gpu_memory_limit_bytes": 2 * 1024**3,
+        "isolation": ISOLATION,
+    }
     backend = NativeBackend(
         profiles, service.backend.state_dir, ROOT, execution_config=policy
     )
@@ -219,7 +226,11 @@ def test_bounded_quote_rejects_model_above_operator_memory_limit(context):
         profiles,
         service.backend.state_dir,
         ROOT,
-        execution_config={"gpu_ids": [0], "gpu_memory_limit_bytes": 1},
+        execution_config={
+            "gpu_ids": [0],
+            "gpu_memory_limit_bytes": 1,
+            "isolation": ISOLATION,
+        },
     )
     with pytest.raises(GymError) as error:
         call(
@@ -232,11 +243,7 @@ def test_bounded_quote_rejects_model_above_operator_memory_limit(context):
     assert call("get_budget")["reserved"] == "0"
 
 
-@pytest.mark.parametrize("mode", ["execute", "inspect"])
-def test_real_data_token_bytes_outside_tokenizer_are_mounted_only_for_execution(
-    tmp_path, monkeypatch, mode
-):
-    monkeypatch.setattr(isolation.shutil, "which", lambda _name: "/usr/bin/bwrap")
+def real_data(tmp_path):
     tokenizer = tmp_path / "tokenizer"
     tokenizer.mkdir()
     table = tmp_path / "metadata" / "token_bytes.pt"
@@ -245,15 +252,27 @@ def test_real_data_token_bytes_outside_tokenizer_are_mounted_only_for_execution(
     train, validation = tmp_path / "train.parquet", tmp_path / "validation.parquet"
     train.touch()
     validation.touch()
-    data = {
+    return {
         "kind": "climbmix",
         "train_paths": [str(train)],
         "dev_path": str(validation),
         "tokenizer": str(tokenizer),
         "token_bytes": str(table),
     }
+
+
+@pytest.mark.parametrize("mode", ["execute", "inspect"])
+def test_real_data_token_bytes_outside_tokenizer_are_mounted_only_for_execution(
+    tmp_path, monkeypatch, mode
+):
+    monkeypatch.setattr(isolation.shutil, "which", lambda _name: "/usr/bin/bwrap")
+    data = real_data(tmp_path)
+    table = Path(data["token_bytes"])
     command = isolation.command(
-        sys.executable, ROOT, {"mode": mode, "profile": {"device": "cpu", "data": data}}
+        sys.executable,
+        ROOT,
+        {"mode": mode, "profile": {"device": "cpu", "data": data}},
+        "bwrap",
     )
     mounts = [
         command[index + 1 : index + 3]
@@ -267,4 +286,126 @@ def test_real_data_token_bytes_outside_tokenizer_are_mounted_only_for_execution(
         for index, item in enumerate(command)
         if item == "--bind"
     )
-    assert not Path(table).is_relative_to(tokenizer)
+    assert not table.is_relative_to(data["tokenizer"])
+
+
+@pytest.mark.parametrize("mode", ["execute", "inspect"])
+def test_landlock_worker_reads_only_runtime_and_job_inputs(tmp_path, monkeypatch, mode):
+    monkeypatch.setattr(isolation.shutil, "which", lambda _name: "/usr/bin/unshare")
+    data = real_data(tmp_path)
+    state = tmp_path / "state"
+    request = {"mode": mode, "profile": {"device": "cpu", "data": data}}
+    if mode == "execute":
+        request["output"] = str(state / "worker-job" / "checkpoint.pt")
+    command = isolation.command(sys.executable, ROOT, request, "landlock")
+    policy = json.loads(command[command.index("nexttransformer_gym.landlock") + 1])
+    namespaces = command[1 : command.index("--")]
+    assert command[0] == "/usr/bin/unshare"
+    assert {"--user", "--net", "--ipc", "--uts", "--pid"} <= set(namespaces)
+    assert command[-3:] == [sys.executable, "-m", "nexttransformer_gym.worker"]
+    table = str(Path(data["token_bytes"]).resolve())
+    workspace = str(state / "worker-job") if mode == "execute" else None
+    assert (table in policy["read"]) == (mode == "execute")
+    assert (workspace in policy["write"]) == (mode == "execute")
+    assert policy["tmp"] == workspace
+    assert not policy["unix_sockets"]
+    assert "/proc/self" not in policy["write"]
+    assert not any(
+        Path(path).is_relative_to(state) for path in policy["read"] + policy["list"]
+    )
+
+
+def test_landlock_gpu_worker_keeps_host_pids_and_opens_card_nodes(
+    tmp_path, monkeypatch
+):
+    nodes = ["/dev/nvidia3", "/dev/nvidiactl", "/dev/nvidia-uvm"]
+    monkeypatch.setattr(isolation.shutil, "which", lambda _name: "/usr/bin/unshare")
+    monkeypatch.setattr(isolation, "cuda_nodes", lambda _request: nodes)
+    monkeypatch.setattr(
+        isolation.glob, "glob", lambda _pattern: ["/dev/nvidia0", "/dev/nvidia3"]
+    )
+    request = {
+        "mode": "execute",
+        "profile": {"device": "cuda:0"},
+        "output": str(tmp_path / "worker-job" / "checkpoint.pt"),
+    }
+    command = isolation.command(sys.executable, ROOT, request, "landlock")
+    policy = json.loads(command[command.index("nexttransformer_gym.landlock") + 1])
+    assert "--pid" not in command[: command.index("--")]
+    assert policy["unix_sockets"]
+    assert {"/proc/self", "/dev/nvidia0", *nodes} <= set(policy["write"])
+    assert "/proc/driver/nvidia" in policy["read"]
+
+
+def test_linker_directories_follow_includes(tmp_path):
+    (tmp_path / "conf.d").mkdir()
+    (tmp_path / "conf.d" / "a.conf").write_text("/example/a\n# comment\n")
+    (tmp_path / "ld.so.conf").write_text(
+        "include conf.d/*.conf\nhwcap 0 x\n/example/b # local\n"
+        f"include {tmp_path}/missing/*.conf\n"
+    )
+    assert isolation.linker_directories(tmp_path / "ld.so.conf") == [
+        "/example/a",
+        "/example/b",
+    ]
+    assert isolation.linker_directories(tmp_path / "absent.conf") == []
+
+
+LAUNCH = """import sys
+from nexttransformer_gym import landlock
+def refuse(*_args):
+    raise OSError("refused")
+landlock.restrict = refuse if sys.argv[1] == "refuse" else lambda *_args: None
+landlock.deny_unix_sockets = lambda: None
+landlock.main(sys.argv[2:])
+"""
+
+
+@pytest.mark.parametrize(
+    "setup, code, expected",
+    [
+        ("refuse", "import sys; open(sys.argv[1], 'w')", 127),
+        ("allow", "import sys; sys.exit(3)", 3),
+        ("allow", "import os; os.kill(os.getpid(), 9)", 137),
+    ],
+)
+def test_landlock_launcher_fails_closed_and_returns_worker_status(
+    tmp_path, setup, code, expected
+):
+    marker, scratch = tmp_path / "ran", tmp_path / "scratch"
+    scratch.mkdir()
+    policy = json.dumps(
+        {"read": [], "list": [], "write": [], "tmp": str(scratch), "unix_sockets": True}
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", LAUNCH, setup, policy, "--"]
+        + [sys.executable, "-c", code, str(marker)],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "gym/src")},
+        capture_output=True,
+    )
+    assert result.returncode == expected
+    assert not marker.exists()
+    assert not any(scratch.iterdir())
+
+
+@pytest.mark.parametrize("abi, euid", [(0, 0), (1, 1000)])
+def test_landlock_backend_refuses_missing_landlock_or_root(
+    tmp_path, monkeypatch, abi, euid
+):
+    monkeypatch.setattr(landlock, "abi_version", lambda: abi)
+    monkeypatch.setattr(isolation.os, "geteuid", lambda: euid)
+    with pytest.raises(GymError) as error:
+        session(tmp_path, "landlock")
+    assert error.value.code == "resource_unavailable"
+
+
+def test_unisolated_backend_warns_and_runs_worker_directly(tmp_path, capsys):
+    service, _, _, _ = session(tmp_path, "none")
+    assert isolation.UNISOLATED_WARNING in capsys.readouterr().err
+    backend = service.backend
+    request = {"mode": "inspect", "profile": backend.profiles["research-fixture"]}
+    assert backend.worker_command(request) == [
+        backend.python,
+        "-m",
+        "nexttransformer_gym.worker",
+    ]

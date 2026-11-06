@@ -92,10 +92,16 @@ Gym 拒绝将优化器设置、数据路径或命令覆盖项作为架构字段�
 Gym 拒绝路径穿越、符号链接、重复路径、运行时覆盖、二进制文件、权重及依赖安装器。
 每个会话最多保留 128 个候选。源码或配置变化会创建新的不可变候选。
 
-研究 worker 使用新的 bubblewrap 用户、挂载、PID 和网络命名空间，不提供无沙箱回退。
-worker 只接收运行时库、只读平台代码、批准的数据及当前任务的检查点和输出。
-worker 不接收控制器状态、凭据、宿主进程或宿主网络。CPU 检查不接收 GPU 设备。
-CUDA worker 接收选定的 NVIDIA 设备、必要的控制/UVM 设备和只读驱动元数据，并使用私有 PID procfs。
+运维选择研究 worker 的隔离后端。Gym 不会自动切换后端。
+默认的 `bwrap` 后端使用新的 bubblewrap 用户、挂载、PID 和网络命名空间。
+`landlock` 后端用于禁止挂载的宿主机。它要求控制器以 root 运行，使 worker 以独立用户运行。
+它结合 Landlock 路径规则与用户、网络、IPC 和 UTS 命名空间。CPU worker 另有 PID 命名空间和禁止新建 Unix socket 的 seccomp 过滤器。
+`none` 后端关闭隔离，仅用于可信候选。使用该后端启动时，Gym 打印警告。
+隔离的 worker 只能读取运行时库、平台代码、批准的数据及当前任务的检查点和输出。
+隔离的 worker 不能读取控制器状态或凭据，也没有宿主网络。CPU 检查不接收 GPU 设备。
+在 `bwrap` 下，CUDA worker 接收选定的 NVIDIA 设备、必要的控制/UVM 设备和只读驱动元数据，并使用私有 PID procfs。
+在 `landlock` 下，worker 能判断路径是否存在、列出导入根目录下的目录，并能修改文件元数据。
+CUDA worker 保留宿主 PID 命名空间，能创建 Unix socket，并能打开所有 NVIDIA 设备节点。
 
 ## 资源与并发
 

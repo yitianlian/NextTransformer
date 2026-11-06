@@ -2,7 +2,10 @@ import base64
 import concurrent.futures
 import io
 import json
+import os
 import runpy
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -11,11 +14,26 @@ from nexttransformer_gym.backend import NativeBackend, Scheduler
 from nexttransformer_gym.common import GymError
 from nexttransformer_gym.evidence import snapshot, verify_receipt
 from nexttransformer_gym.final import launch_final_run, reconcile
+from nexttransformer_gym.landlock import abi_version
 from nexttransformer_gym.package import ingest
 from nexttransformer_gym.server import bind
 from nexttransformer_gym.service import Service
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def bwrap_usable():
+    executable = shutil.which("bwrap")
+    if executable is None:
+        return False
+    probe = [executable, "--unshare-all", "--ro-bind", "/", "/", "true"]
+    return subprocess.run(probe, capture_output=True).returncode == 0
+
+
+BWRAP = bwrap_usable()
+LANDLOCK = abi_version() >= 1 and os.geteuid() == 0
+# Tests use bwrap where it works, then landlock; with neither, bwrap tests fail.
+ISOLATION = "bwrap" if BWRAP or not LANDLOCK else "landlock"
 
 
 def candidate_bytes(activation="square"):
@@ -26,10 +44,11 @@ def candidate_bytes(activation="square"):
     return blob.getvalue()
 
 
-@pytest.fixture
-def context(tmp_path):
+def session(tmp_path, isolation=ISOLATION):
     profiles = json.loads((ROOT / "gym/examples/profiles.fixture.json").read_text())
-    backend = NativeBackend(profiles, tmp_path, ROOT)
+    backend = NativeBackend(
+        profiles, tmp_path, ROOT, execution_config={"isolation": isolation}
+    )
     service = Service(tmp_path / "gym.sqlite3", backend)
     credentials = service.create_session(10**12, "test-trial")
 
@@ -42,6 +61,11 @@ def context(tmp_path):
         idempotency_key="first",
     )
     return service, credentials, call, candidate
+
+
+@pytest.fixture
+def context(tmp_path):
+    return session(tmp_path)
 
 
 def run_job(context, **params):
@@ -81,7 +105,9 @@ def test_continuation_matches_uninterrupted_training(context):
     assert context[2]("get_budget")["reserved"] == "0"
 
 
-def test_full_submission_verifier_and_separate_final(context, monkeypatch, capsys):
+def test_full_submission_verifier_and_separate_final(
+    context, monkeypatch, capsys, tmp_path_factory
+):
     service, credentials, call, candidate = context
     job = call(
         "validate_candidate",
@@ -133,8 +159,15 @@ def test_full_submission_verifier_and_separate_final(context, monkeypatch, capsy
             service.call(credentials["verifier_token"], op, {})
     # The final dispatcher needs only the receipt and durable Gym state, not
     # an Agent workspace or the original in-memory candidate/service objects.
-    backend = NativeBackend(service.backend.profiles, service.backend.state_dir, ROOT)
+    backend = NativeBackend(
+        service.backend.profiles,
+        service.backend.state_dir,
+        ROOT,
+        execution_config=service.backend.execution_config,
+    )
     service = Service(backend.state_dir / "gym.sqlite3", backend)
+    policy = tmp_path_factory.mktemp("operator") / "execution.json"
+    policy.write_text(json.dumps(backend.execution_config))
     import sys
     from nexttransformer_gym.cli import main
 
@@ -150,6 +183,8 @@ def test_full_submission_verifier_and_separate_final(context, monkeypatch, capsy
                 str(ROOT / "gym/examples/profiles.fixture.json"),
                 "--platform",
                 str(ROOT),
+                "--execution-config",
+                str(policy),
                 *arguments,
             ],
         )
@@ -792,23 +827,50 @@ print(json.dumps({"loss":loss.item(),"parameters_and_gradients":h.hexdigest(),"c
     assert accepted["architecture"] == results[0]["config"]
 
 
-def test_native_worker_cannot_read_controller_files_or_reach_host(context, tmp_path):
+@pytest.mark.parametrize(
+    "isolation",
+    [
+        pytest.param(
+            "bwrap",
+            marks=pytest.mark.skipif(not BWRAP, reason="bwrap cannot run here"),
+        ),
+        pytest.param(
+            "landlock",
+            marks=pytest.mark.skipif(
+                not LANDLOCK, reason="landlock needs Landlock and a root controller"
+            ),
+        ),
+    ],
+)
+def test_native_worker_cannot_read_controller_files_or_reach_host(tmp_path, isolation):
     import socket
 
-    service, _, call, _ = context
+    service, _, call, _ = session(tmp_path, isolation)
     private = tmp_path / "controller-secret"
     private.write_text("not-for-workers")
-    with socket.socket() as listener:
+    unix_path = tmp_path / "controller.sock"
+    with socket.socket() as listener, socket.socket(socket.AF_UNIX) as unix:
         listener.bind(("127.0.0.1", 0))
         listener.listen()
         port = listener.getsockname()[1]
-        checks = f"""from pathlib import Path
-import socket
-assert not Path({str(private)!r}).exists()
-assert not Path({str(service.store.path)!r}).exists()
+        unix.bind(str(unix_path))
+        unix.listen()
+        checks = f"""import socket
+for path in ({str(private)!r}, {str(service.store.path)!r}):
+    try:
+        open(path, "rb").close()
+    except OSError:
+        continue
+    raise AssertionError("worker read " + path)
 s=socket.socket();s.settimeout(0.2)
 assert s.connect_ex(("127.0.0.1",{port})) != 0
 s.close()
+try:
+    socket.socket(socket.AF_UNIX).connect({str(unix_path)!r})
+except OSError:
+    pass
+else:
+    raise AssertionError("worker reached a controller Unix socket")
 """
         source = runpy.run_path(str(ROOT / "gym/examples/make_candidate.py"))["ENTRY"]
         candidate = call(

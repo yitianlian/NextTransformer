@@ -8,7 +8,7 @@ from nexttransformer_gym import gpu
 from nexttransformer_gym.backend import NativeBackend, Scheduler
 from nexttransformer_gym.common import GymError
 
-from test_gym import ROOT, context as make_context
+from test_gym import ISOLATION, ROOT, context as make_context
 
 GPU_A = "GPU-00000000-0000-0000-0000-000000000001"
 GPU_B = "GPU-00000000-0000-0000-0000-000000000002"
@@ -44,6 +44,7 @@ def config(ids=None):
         "gpu_ids": [GPU_A] if ids is None else ids,
         "gpu_memory_limit_bytes": 1024**3,
         "max_concurrent_jobs": 1,
+        "isolation": ISOLATION,
     }
 
 
@@ -57,6 +58,7 @@ def config(ids=None):
         {"gpu_memory_limit_bytes": True},
         {"max_concurrent_jobs": 2},
         {"allow_idle_graphics": "true"},
+        {"isolation": "chroot"},
         {"command": "nvidia-smi"},
     ],
 )

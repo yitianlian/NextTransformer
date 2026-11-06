@@ -1,16 +1,23 @@
-# Gym usage
+# NextTransformer Gym
 
 [中文](README.zh-CN.md) · [Design](DESIGN.md)
 
-Gym runs architecture experiments on the host. Harbor runs Claude Code and the submission verifier in separate containers.
-The examples use synthetic data. They do not measure production ClimbMix or CORE-22 performance.
+Gym runs model architecture research experiments: the host runs training, and Harbor runs Claude Code and the submission verifier in separate containers.
+The examples use synthetic data. They do not represent production ClimbMix or CORE-22 performance.
 
-Harbor reads the [Agent task instructions](tasks/architecture-research/instruction.md).
+- [Install](#install) · [Start a research session](#start-a-research-session) · [Run an experiment and submit](#run-an-experiment-and-submit)
+- [Gym API](#gym-api) · [Submit a native candidate](#submit-a-native-candidate) · [Worker isolation](#worker-isolation)
+- [Errors and recovery](#errors-and-recovery) · [Check the installation](#check-the-installation)
+
+The Agent's requirements are in the [task instructions](tasks/architecture-research/instruction.md). Run the host commands below from the repository root.
 
 ## Install
 
-Use Linux with Docker, bubblewrap and unprivileged user namespaces. The Gym package requires Python 3.12 or 3.13.
-Run these commands from the repository root:
+Requirements:
+
+- Linux, Docker and unprivileged user namespaces.
+- Python 3.12 or 3.13, and `uv`.
+- Bubblewrap, or a kernel with Landlock; see [Worker isolation](#worker-isolation).
 
 ```sh
 uv sync --project gym --extra worker
@@ -247,6 +254,36 @@ A successful check job can contain failed checks. Read `checks` and `admitted` b
 Settle or cancel all jobs before `finalize`. The account must have no reserved budget.
 Gym retains the source. The verifier checks the receipt but does not start final training.
 See [research_with_placement.py](examples/research_with_placement.py) for resource selection.
+
+<a id="worker-isolation"></a>
+
+## Worker isolation
+
+Candidate code runs in worker processes on the host. Set `isolation` in the execution configuration to select the backend:
+
+| Value | Isolation | Use |
+| --- | --- | --- |
+| `bwrap` (default) | Fresh bubblewrap user, mount, PID and network namespaces | Hosts that allow unprivileged mount namespaces |
+| `landlock` | Landlock path rules with user, network, IPC and UTS namespaces. CPU workers also get a PID namespace and a seccomp filter against new Unix sockets | Hosts that deny mounts, such as unprivileged Kubernetes pods |
+| `none` | No isolation | Trusted candidates only. Gym prints a warning at startup |
+
+`landlock` requires a root controller, util-linux `unshare` and an x86_64 or aarch64 kernel with Landlock.
+A CPU session can use a configuration with only this field:
+
+```json
+{"schema_version": "gym.execution.v1", "isolation": "landlock"}
+```
+
+`landlock` is weaker than `bwrap`:
+
+- Workers can detect whether a path exists and can list every directory under the platform root and the Gym source root. They cannot read files outside the allowed paths.
+- Landlock does not restrict metadata changes such as chmod and utime.
+- CUDA needs the host PID namespace and Unix sockets, so CUDA workers keep both. Processes they detach can outlive the job.
+  As `nobody`, they can connect only to Unix sockets that every user may write to.
+- CUDA workers can open every NVIDIA device node. `CUDA_VISIBLE_DEVICES` selects the allocated GPU but does not confine the worker to it.
+
+If the controller runs as root, workers run as `nobody` under every backend. That user must be able to read the platform source and the worker Python.
+`get_resources` reports the configured backend in `execution_config`.
 
 ## Errors and recovery
 

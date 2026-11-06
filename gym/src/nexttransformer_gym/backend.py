@@ -31,8 +31,10 @@ class NativeBackend:
 
         self.server_id = server_id or local_server_id()
         from .gpu import configuration
+        from .isolation import preflight
 
         self.execution_config = configuration(execution_config)
+        preflight(self.execution_config["isolation"])
         self.profiles = copy.deepcopy(profiles)
         for profile in self.profiles.values():
             if self.execution_config["gpu_ids"] and not profile.get("official_plan"):
@@ -363,7 +365,12 @@ print(json.dumps({'dependencies': {n:m.version(n) for n in names}, 'python':list
             return [self.python, "-m", "nexttransformer_gym.worker"]
         from .isolation import command
 
-        return command(self.python, self.platform_root, request)
+        return command(
+            self.python,
+            self.platform_root,
+            request,
+            self.execution_config["isolation"],
+        )
 
     @staticmethod
     def worker_identity(request):
